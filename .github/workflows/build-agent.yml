@@ -1,0 +1,94 @@
+name: Build Micro XRCE-DDS Agent (ARM64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build"
+        required: true
+        default: "v3.0.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (empty repo)
+        uses: actions/checkout@v4
+
+      - name: Clone Micro XRCE-DDS Agent
+        run: |
+          git clone --branch ${{ github.event.inputs.tag }} --depth 1 https://github.com/eProsima/Micro-XRCE-DDS-Agent.git agent
+
+      - name: Replace Dockerfile
+        run: |
+          cat > agent/Dockerfile << 'EOF'
+          #########################################################################################
+          # Micro XRCE-DDS Agent Docker
+          #########################################################################################
+
+          FROM ubuntu AS build
+          ENV DEBIAN_FRONTEND=noninteractive
+          WORKDIR /root
+
+          RUN apt-get update && apt-get install -y \
+              software-properties-common \
+              build-essential \
+              cmake \
+              git \
+              openjdk-8-jdk \
+              gradle \
+              && rm -rf /var/lib/apt/lists/*
+
+          ENV JAVA_HOME="/usr/lib/jvm/java-8-openjdk-amd64/"
+
+          RUN mkdir -p /agent/build
+          ADD . /agent/
+
+          RUN cd /agent/build && \
+              cmake -DCMAKE_INSTALL_PREFIX=../install .. && \
+              make -j$(nproc) && make install && \
+              cp agent.refs ../install/
+
+          RUN cd /agent && \
+              tar -czvf install.tar.gz -C install .
+
+          FROM ubuntu AS export
+          WORKDIR /dest
+
+          COPY --from=build /agent/install.tar.gz .
+          COPY --from=build /agent/agent.refs .
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 artifact (tar export)
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --target export \
+            --output type=tar,dest=artifact.tar \
+            agent
+
+      - name: Extract artifact
+        run: |
+          mkdir out
+          tar -xf artifact.tar -C out
+
+      - name: Prepare release asset
+        run: |
+          ls
+          mv out/dest/install.tar.gz microxrce-agent-${{ github.event.inputs.tag }}-arm64.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: microxrce-${{ github.event.inputs.tag }}
+          name: Micro XRCE-DDS Agent ${{ github.event.inputs.tag }} (ARM64)
+          files: microxrce-agent-${{ github.event.inputs.tag }}-arm64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
